@@ -1,0 +1,56 @@
+name: Build Static ARM64 for OpenWrt
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-static:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Install ARM64 cross compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+    
+    - name: Build static binary
+      run: |
+        echo "Building static ARM64 binary..."
+        
+        CC=aarch64-linux-gnu-gcc \
+        CGO_ENABLED=1 \
+        GOOS=linux \
+        GOARCH=arm64 \
+        go build \
+          -ldflags="-s -w -extldflags '-static'" \
+          -tags "osusergo netgo" \
+          -o lumiine-openwrt-arm64 \
+          .
+        
+        echo "Verifying binary..."
+        file lumiine-openwrt-arm64
+        echo "Size: $(ls -lh lumiine-openwrt-arm64 | awk '{print $5}')"
+        
+        # 检查是否真的是静态链接
+        echo -e "\nChecking dependencies:"
+        if readelf -d lumiine-openwrt-arm64 2>/dev/null | grep -q NEEDED; then
+          echo "❌ Still has dynamic dependencies!"
+          readelf -d lumiine-openwrt-arm64 | grep NEEDED
+        else
+          echo "✅ Fully static binary!"
+        fi
+    
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: lumiine-static-arm64
+        path: lumiine-openwrt-arm64
