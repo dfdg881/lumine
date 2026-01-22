@@ -12,11 +12,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
-const status500 = "500 Internal Server Error"
+const (
+	status500 = "500 Internal Server Error"
+	status403 = "403 Forbidden"
+)
 
 var httpConnID uint32
 
@@ -40,6 +41,9 @@ func httpAccept(addr *string, serverAddr string, done chan struct{}) {
 		Addr:              listenAddr,
 		Handler:           http.HandlerFunc(handleHTTP),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if listenAddr[0] == ':' {
+		listenAddr = "0.0.0.0" + listenAddr
 	}
 	fmt.Println("Listening on", "http://"+listenAddr)
 	if err := srv.ListenAndServe(); err != nil {
@@ -85,95 +89,26 @@ func handleConnect(logger *log.Logger, w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	var (
-		dstHost string
-		policy  *Policy
-	)
-	if net.ParseIP(originHost) != nil {
-		var ipPolicy *Policy
-		dstHost, ipPolicy, err = ipRedirect(logger, originHost)
-		if err != nil {
-			logger.Println("IP redirect error:", err)
-			return
-		}
-		if ipPolicy == nil {
-			policy = &defaultPolicy
-		} else {
-			policy = mergePolicies(defaultPolicy, *ipPolicy)
-		}
-	} else {
-		domainPolicy := domainMatcher.Find(originHost)
-		found := domainPolicy != nil
-		if found {
-			policy = mergePolicies(defaultPolicy, *domainPolicy)
-		} else {
-			policy = &defaultPolicy
-		}
-		var disableRedirect bool
-		if policy.Host == nil || *policy.Host == "" {
-			var first uint16
-			if policy.IPv6First != nil && *policy.IPv6First {
-				first = dns.TypeAAAA
-			} else {
-				first = dns.TypeA
-			}
-			if policy.DNSRetry != nil && *policy.DNSRetry {
-				var second uint16
-				if first == dns.TypeA {
-					second = dns.TypeAAAA
-				} else {
-					second = dns.TypeA
-				}
-				var err1, err2 error
-				dstHost, err1, err2 = doubleQuery(originHost, first, second)
-				if err2 != nil {
-					logger.Printf("DNS %s fail: %s, %s", originHost, err1, err2)
-					http.Error(w, "", http.StatusInternalServerError)
-					return
-				}
-			} else {
-				var err error
-				dstHost, err = dnsQuery(originHost, first)
-				if err != nil {
-					logger.Printf("DNS %s fail: %s", originHost, err)
-					http.Error(w, "", http.StatusInternalServerError)
-					return
-				}
-				logger.Printf("DNS %s -> %s", originHost, dstHost)
-			}
-		} else {
-			disableRedirect = (*policy.Host)[0] == '^'
-			if disableRedirect {
-				dstHost = (*policy.Host)[1:]
-			} else {
-				dstHost = *policy.Host
-			}
-		}
-		var ipPolicy *Policy
-		if !disableRedirect {
-			dstHost, ipPolicy, err = ipRedirect(logger, dstHost)
-			if err != nil {
-				logger.Println("IP redirect error:", err)
-				return
-			}
-			if ipPolicy != nil {
-				if found {
-					policy = mergePolicies(defaultPolicy, *ipPolicy, *domainPolicy)
-				} else {
-					policy = mergePolicies(defaultPolicy, *ipPolicy)
-				}
-			}
-		}
+	dstHost, policy, fail, block := genPolicy(logger, originHost)
+	if fail {
+		http.Error(w, status500, http.StatusInternalServerError)
+		return
 	}
+	if block {
+		logger.Println("Connection blocked")
+		http.Error(w, status403, http.StatusForbidden)
+		return
+	}
+
 	logger.Println("Policy:", policy)
 
-	if policy.Mode == "block" {
+	if policy.Mode == ModeBlock {
 		http.Error(w, "", http.StatusForbidden)
 		return
 	}
 
-	if policy.Port != nil && *policy.Port != 0 {
-		dstPort = fmt.Sprintf("%d", *policy.Port)
+	if policy.Port != 0 && policy.Port != -1 {
+		dstPort = fmt.Sprintf("%d", policy.Port)
 	}
 
 	dest := net.JoinHostPort(dstHost, dstPort)
@@ -205,7 +140,7 @@ func handleConnect(logger *log.Logger, w http.ResponseWriter, req *http.Request)
 	}
 	defer closeBoth()
 
-	replyFirst := policy.ReplyFirst != nil && *policy.ReplyFirst
+	replyFirst := policy.ReplyFirst == BoolTrue
 	if replyFirst {
 		_, err = cliConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 		if err != nil {

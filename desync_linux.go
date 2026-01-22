@@ -14,6 +14,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const minInterval = 100 * time.Millisecond
+
+var (
+	ttlCacheEnabled bool
+	ttlCache        sync.Map
+	ttlCacheTTL     int
+)
+
+type ttlCacheEntry struct {
+	TTL      int
+	ExpireAt time.Time
+}
+
 func tryConnectWithTTL(target string, level, opt, ttl int) (bool, error) {
 	dialer := net.Dialer{
 		Timeout: 500 * time.Millisecond,
@@ -40,22 +53,11 @@ func tryConnectWithTTL(target string, level, opt, ttl int) (bool, error) {
 	return true, nil
 }
 
-var (
-	ttlCacheEnabled bool
-	ttlCache        sync.Map
-	ttlCacheTTL int
-)
-
-type ttlCacheValue struct {
-	TTL      int
-	ExpireAt time.Time
-}
-
 func minReachableTTL(addr string, ipv6 bool) (int, error) {
 	if ttlCacheEnabled {
 		v, ok := ttlCache.Load(addr)
 		if ok {
-			k := v.(ttlCacheValue)
+			k := v.(ttlCacheEntry)
 			if !k.ExpireAt.IsZero() {
 				if time.Now().Before(k.ExpireAt) {
 					return k.TTL, nil
@@ -96,7 +98,7 @@ func minReachableTTL(addr string, ipv6 bool) (int, error) {
 		} else {
 			expireAt = time.Now().Add(time.Duration(ttlCacheTTL * int(time.Second)))
 		}
-		ttlCache.Store(addr, ttlCacheValue{
+		ttlCache.Store(addr, ttlCacheEntry{
 			TTL:      found,
 			ExpireAt: expireAt,
 		})
@@ -109,7 +111,7 @@ func sendFakeData(
 	fd int,
 	fakeData, realData []byte,
 	fakeTTL, defaultTTL, level, opt int,
-	fakeSleep float64,
+	fakeSleep time.Duration,
 ) error {
 	pipeFds := make([]int, 2)
 	if err := unix.Pipe(pipeFds); err != nil {
@@ -145,10 +147,7 @@ func sendFakeData(
 	if _, err := unix.Splice(pipeR, nil, fd, nil, len(fakeData), 0); err != nil {
 		return fmt.Errorf("splice: %s", err)
 	}
-	if fakeSleep < 0.1 {
-		fakeSleep = 0.1
-	}
-	time.Sleep(time.Duration(fakeSleep * float64(time.Second)))
+	time.Sleep(fakeSleep)
 
 	copy(data, realData)
 
@@ -161,7 +160,7 @@ func sendFakeData(
 
 func desyncSend(
 	conn net.Conn, ipv6 bool,
-	firstPacket []byte, sniPos, sniLen, fakeTTL int, fakeSleep float64,
+	firstPacket []byte, sniPos, sniLen, fakeTTL int, fakeSleep time.Duration,
 ) error {
 	rawConn, err := getRawConn(conn)
 	if err != nil {
@@ -175,10 +174,7 @@ func desyncSend(
 		return fmt.Errorf("control: %w", err)
 	}
 
-	var (
-		level, opt, defaultTTL int
-		getErr                 error
-	)
+	var level, opt, defaultTTL int
 	if ipv6 {
 		level = unix.IPPROTO_IPV6
 		opt = unix.IPV6_UNICAST_HOPS
@@ -186,23 +182,37 @@ func desyncSend(
 		level = unix.IPPROTO_IP
 		opt = unix.IP_TTL
 	}
-	err = rawConn.Control(func(fd uintptr) {
-		defaultTTL, getErr = unix.GetsockoptInt(int(fd), level, opt)
-	})
+	defaultTTL, err = unix.GetsockoptInt(fd, level, opt)
 	if err != nil {
-		return fmt.Errorf("control: %s", err)
-	}
-	if getErr != nil {
 		return fmt.Errorf("get default ttl: %s", err)
 	}
 
-	if fakeSleep < 0.1 {
-		fakeSleep = 0.1
+	if fakeSleep < minInterval {
+		fakeSleep = minInterval
 	}
-	cut := sniLen/2 + sniPos
+
+	cut := -1
+	for i := sniPos + sniLen; i >= sniPos; i-- {
+		if firstPacket[i] == '.' {
+			cut = i
+			break
+		}
+	}
+	var fakeData []byte
+	if cut == -1 {
+		cut = sniLen/2 + sniPos
+		fakeData = firstPacket[:cut]
+	} else {
+		fakeData = make([]byte, cut)
+		copy(fakeData, firstPacket[:sniPos])
+		for i := sniPos; i < cut; i++ {
+			fakeData[i] = 0x00
+		}
+	}
+
 	err = sendFakeData(
 		fd,
-		make([]byte, cut),
+		fakeData,
 		firstPacket[:cut],
 		fakeTTL,
 		defaultTTL,
