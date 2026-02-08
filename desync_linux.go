@@ -4,27 +4,12 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net"
-	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
-
-const minInterval = 100 * time.Millisecond
-
-var (
-	ttlCacheEnabled bool
-	ttlCache        sync.Map
-	ttlCacheTTL     int
-)
-
-type ttlCacheEntry struct {
-	TTL      int
-	ExpireAt time.Time
-}
 
 func minReachableTTL(addr string, ipv6 bool, maxTTL, attempts int, dialTimeout time.Duration) (int, error) {
 	if ttlCacheEnabled {
@@ -72,8 +57,6 @@ func minReachableTTL(addr string, ipv6 bool, maxTTL, attempts int, dialTimeout t
 				conn.Close()
 				ok = true
 				break
-			} else {
-				log.Println(err)
 			}
 		}
 		if ok {
@@ -198,9 +181,6 @@ func desyncSend(
 	} else {
 		fakeData = make([]byte, cut)
 		copy(fakeData, firstPacket[:sniPos])
-		for i := sniPos; i < cut; i++ {
-			fakeData[i] = 0x00
-		}
 	}
 
 	err = sendFakeData(

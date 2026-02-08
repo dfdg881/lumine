@@ -2,50 +2,27 @@ package main
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"net"
 	"time"
 )
 
-func sendRecords(conn net.Conn, data []byte, offset, length,
-	numRcd, numSeg int, oob bool,
-	interval time.Duration) error {
-	if len(data) < 5 {
-		return errors.New("data too short")
-	}
-	if numRcd <= 0 {
-		return errors.New("invalid numRcd")
-	}
-	if numSeg != 1 && numSeg != -1 && numSeg <= 0 {
-		return errors.New("invalid numSeg")
-	}
-	if length < 4 {
-		return errors.New("invalid length")
-	}
-
+func sendRecords(conn net.Conn, data []byte,
+	offset, _, numRcd, numSeg int,
+	oob, modMinorVer bool, interval time.Duration) error {
 	header := data[:3]
-	payload := data[5:]
-	offset -= 5
-
-	if offset < -1 {
-		return errors.New("adjusted offset < -1")
-	}
-	if offset+length > len(payload) {
-		return errors.New("slice out of payload bounds")
+	if modMinorVer {
+		header[2] = 0x04
 	}
 
-	cut := offset + 1 + 2
-
+	cut := offset - 5 + 1 + 2
 	rightChunks := numRcd / 2
 	leftChunks := numRcd - rightChunks
-
 	chunks := make([][]byte, 0, numRcd)
-	splitAndAppend(payload[:cut], header, leftChunks, &chunks)
-	splitAndAppend(payload[cut:], header, rightChunks, &chunks)
+	splitAndAppend(data[5:cut], header, leftChunks, &chunks)
+	splitAndAppend(data[cut:], header, rightChunks, &chunks)
 
 	if numSeg == -1 {
-		itv := interval != 0
 		for i, chunk := range chunks {
 			if _, err := conn.Write(chunk); err != nil {
 				return fmt.Errorf("write record %d: %s", i+1, err)
@@ -55,7 +32,7 @@ func sendRecords(conn net.Conn, data []byte, offset, length,
 					return fmt.Errorf("oob: %s", err)
 				}
 			}
-			if itv {
+			if interval > 0 {
 				time.Sleep(interval)
 			}
 		}
@@ -77,7 +54,6 @@ func sendRecords(conn net.Conn, data []byte, offset, length,
 	}
 
 	base := len(merged) / numSeg
-	itv := interval != 0 && interval != -1
 	for i := range numSeg {
 		start := i * base
 		end := start + base
@@ -92,7 +68,7 @@ func sendRecords(conn net.Conn, data []byte, offset, length,
 				return fmt.Errorf("oob: %s", err)
 			}
 		}
-		if itv {
+		if interval > 0 {
 			time.Sleep(interval)
 		}
 	}
@@ -120,11 +96,9 @@ func splitAndAppend(data, header []byte, n int, result *[][]byte) {
 }
 
 func makeRecord(header, payload []byte) []byte {
-	h := make([]byte, len(header))
-	copy(h, header)
-	var l [2]byte
-	binary.BigEndian.PutUint16(l[:], uint16(len(payload)))
-	rec := append(h, l[:]...)
-	rec = append(rec, payload...)
+	rec := make([]byte, 5+len(payload))
+	copy(rec[:3], header)
+	binary.BigEndian.PutUint16(rec[3:5], uint16(len(payload)))
+	copy(rec[5:], payload)
 	return rec
 }

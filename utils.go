@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -431,17 +430,9 @@ func doubleQuery(domain string, first, second uint16) (ip string, err1, err2 err
 	return
 }
 
-func getRawConn(conn net.Conn) (syscall.RawConn, error) {
-	tcpConn, ok := conn.(*net.TCPConn)
-	if !ok {
-		return nil, errors.New("not *net.TCPConn")
-	}
-	return tcpConn.SyscallConn()
-}
-
 func ipRedirect(logger *log.Logger, ip string) (string, *Policy, error) {
 	for range maxJump {
-		policy := matchIP(ip)
+		policy := getIPPolicy(ip)
 		if policy == nil {
 			return ip, nil, nil
 		}
@@ -472,7 +463,7 @@ func ipRedirect(logger *log.Logger, ip string) (string, *Policy, error) {
 			ip = mapTo
 			continue
 		}
-		return mapTo, matchIP(mapTo), nil
+		return mapTo, getIPPolicy(mapTo), nil
 	}
 	return "", nil, errors.New("too many redirects")
 }
@@ -507,7 +498,7 @@ func handleTunnel(
 	}
 
 	br := bufio.NewReader(cliConn)
-	peekBytes, err := br.Peek(5)
+	peekBytes, err := br.Peek(1)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			logger.Println("Empty tunnel")
@@ -539,7 +530,7 @@ func handleTunnel(
 		if policy == nil {
 			policy = &defaultPolicy
 		} else {
-			policy = mergePolicies(defaultPolicy, *policy)
+			policy = mergePolicies(*policy, defaultPolicy)
 		}
 		if p.Host != nil && *p.Host != "" {
 			if (*p.Host)[0] != '^' {
@@ -549,7 +540,7 @@ func handleTunnel(
 					return
 				}
 				if ipPolicy != nil {
-					policy = mergePolicies(defaultPolicy, *ipPolicy, *policy)
+					policy = mergePolicies(*policy, *ipPolicy, defaultPolicy)
 				}
 			}
 		}
@@ -579,7 +570,7 @@ func handleTunnel(
 				return
 			}
 		} else {
-			statusLine := strconv.Itoa(p.HttpStatus)+http.StatusText(p.HttpStatus)
+			statusLine := strconv.Itoa(p.HttpStatus) + " " + http.StatusText(p.HttpStatus)
 			resp := &http.Response{
 				Status:        statusLine,
 				StatusCode:    p.HttpStatus,
@@ -649,7 +640,7 @@ func handleTunnel(
 				if domainPolicy == nil {
 					domainPolicy = &defaultPolicy
 				} else {
-					domainPolicy = mergePolicies(defaultPolicy, *domainPolicy)
+					domainPolicy = mergePolicies(*domainPolicy, defaultPolicy)
 				}
 				switch domainPolicy.Mode {
 				case ModeBlock:
@@ -681,7 +672,8 @@ func handleTunnel(
 			case ModeTLSRF:
 				err = sendRecords(dstConn, record, sniPos, sniLen,
 					p.NumRecords, p.NumSegments,
-					p.OOB == BoolTrue, p.SendInterval)
+					p.OOB == BoolTrue, p.ModMinorVer == BoolTrue,
+					p.SendInterval)
 				if err != nil {
 					logger.Println("TLS fragmentation fail:", err)
 					return
@@ -712,7 +704,7 @@ func handleTunnel(
 					} else {
 						ttl -= 1
 					}
-					logger.Println("fake_ttl="+strconv.Itoa(ttl))
+					logger.Println("fake_ttl=" + strconv.Itoa(ttl))
 				} else {
 					ttl = p.FakeTTL
 				}
@@ -766,7 +758,7 @@ func genPolicy(logger *log.Logger, originHost string) (dstHost string, p *Policy
 		if ipPolicy == nil {
 			p = &defaultPolicy
 		} else {
-			p = mergePolicies(defaultPolicy, *ipPolicy)
+			p = mergePolicies(*ipPolicy, defaultPolicy)
 		}
 		if p.Mode == ModeBlock {
 			return "", nil, false, true
@@ -775,7 +767,7 @@ func genPolicy(logger *log.Logger, originHost string) (dstHost string, p *Policy
 		domainPolicy := domainMatcher.Find(originHost)
 		found := domainPolicy != nil
 		if found {
-			p = mergePolicies(defaultPolicy, *domainPolicy)
+			p = mergePolicies(*domainPolicy, defaultPolicy)
 		} else {
 			p = &defaultPolicy
 		}
@@ -829,9 +821,9 @@ func genPolicy(logger *log.Logger, originHost string) (dstHost string, p *Policy
 			}
 			if ipPolicy != nil {
 				if found {
-					p = mergePolicies(defaultPolicy, *ipPolicy, *domainPolicy)
+					p = mergePolicies(*domainPolicy, *ipPolicy, defaultPolicy)
 				} else {
-					p = mergePolicies(defaultPolicy, *ipPolicy)
+					p = mergePolicies(*ipPolicy, defaultPolicy)
 				}
 				if p.Mode == ModeBlock {
 					return "", nil, false, true
@@ -840,27 +832,4 @@ func genPolicy(logger *log.Logger, originHost string) (dstHost string, p *Policy
 		}
 	}
 	return
-}
-
-type BoolWithDefault uint8
-
-const (
-	BoolUnset BoolWithDefault = iota
-	BoolFalse
-	BoolTrue
-)
-
-func (b *BoolWithDefault) UnmarshalJSON(data []byte) error {
-	s := string(data)
-	switch s {
-	case "null":
-		*b = BoolUnset
-	case "false":
-		*b = BoolFalse
-	case "true":
-		*b = BoolTrue
-	default:
-		return fmt.Errorf("Invalid bool: %s", s)
-	}
-	return nil
 }

@@ -14,7 +14,7 @@ import (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "moi-si/lumine v0.2.1")
+		fmt.Fprintln(os.Stderr, "moi-si/lumine v0.3.0")
 		fmt.Fprintln(os.Stderr)
 		flag.PrintDefaults()
 	}
@@ -174,7 +174,7 @@ func handleSOCKS5(clientConn net.Conn, id uint32) {
 		if ipPolicy == nil {
 			policy = &defaultPolicy
 		} else {
-			policy = mergePolicies(defaultPolicy, *ipPolicy)
+			policy = mergePolicies(*ipPolicy, defaultPolicy)
 		}
 	case 0x04: // IPv6 address
 		ipBytes, err := readN(clientConn, 16)
@@ -193,7 +193,7 @@ func handleSOCKS5(clientConn net.Conn, id uint32) {
 		if ipPolicy == nil {
 			policy = &defaultPolicy
 		} else {
-			policy = mergePolicies(defaultPolicy, *ipPolicy)
+			policy = mergePolicies(*ipPolicy, defaultPolicy)
 		}
 	case 0x03: // Domain name
 		lenByte, err := readN(clientConn, 1)
