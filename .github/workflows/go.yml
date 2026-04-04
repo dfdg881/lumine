@@ -13,10 +13,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-    - name: Install ARM64 cross compiler
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu jq
+      - name: Install ARM64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu jq
 
       - name: Get latest UPX version
         id: upx_info
@@ -24,54 +24,62 @@ jobs:
           UPX_INFO=$(curl -sL "https://api.github.com/repos/upx/upx/releases/latest")
           UPX_VERSION=$(echo "$UPX_INFO" | jq -r '.tag_name | ltrimstr("v")')
           UPX_DOWNLOAD_URL=$(echo "$UPX_INFO" | jq -r '.assets[] | select(.name | test(".*amd64_linux.tar.xz$")) | .browser_download_url')
+          
           echo "version=$UPX_VERSION" >> $GITHUB_OUTPUT
           echo "download_url=$UPX_DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.21'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
 
       - name: Setup UPX
         run: |
+          echo "Downloading UPX version ${{ steps.upx_info.outputs.version }}"
           curl -L -o upx.tar.xz "${{ steps.upx_info.outputs.download_url }}"
           tar -xJf upx.tar.xz --strip-components=1 "upx-${{ steps.upx_info.outputs.version }}-amd64_linux/upx"
           chmod +x ./upx
-    
-    - name: Build static binary
-      run: |
-        echo "Building static ARM64 binary..."
-        
-        CC=aarch64-linux-gnu-gcc \
-        CGO_ENABLED=1 \
-        GOOS=linux \
-        GOARCH=arm64 \
-        go build \
-          -ldflags="-s -w -extldflags '-static'" \
-          -tags "osusergo netgo" \
-          -o lumiine-openwrt-arm64 \
-          .
-        
-        echo "Verifying binary..."
-        file lumiine-openwrt-arm64
-        echo "Size: $(ls -lh lumiine-openwrt-arm64 | awk '{print $5}')"
-        
-        # 检查是否真的是静态链接
-        echo -e "\nChecking dependencies:"
-        if readelf -d lumiine-openwrt-arm64 2>/dev/null | grep -q NEEDED; then
-          echo "❌ Still has dynamic dependencies!"
-          readelf -d lumiine-openwrt-arm64 | grep NEEDED
-        else
-          echo "✅ Fully static binary!"
-        fi
+          echo "UPX version: $(./upx --version | head -n 1)"
 
-      - name: Compress with UPX
+      - name: Build static ARM64 binary
         run: |
+          echo "Building static ARM64 binary for OpenWrt..."
+          
+          CC=aarch64-linux-gnu-gcc \
+          CGO_ENABLED=1 \
+          GOOS=linux \
+          GOARCH=arm64 \
+          go build \
+            -ldflags="-s -w -extldflags '-static'" \
+            -tags "osusergo netgo" \
+            -o lumiine-openwrt-arm64 \
+            .
+          
+          echo "Binary built successfully."
+          echo "File type: $(file lumiine-openwrt-arm64)"
+          echo "Size: $(ls -lh lumiine-openwrt-arm64 | awk '{print $5}')"
+
+          # Verify static linking
+          echo -e "\n🔍 Checking for dynamic dependencies..."
+          if readelf -d lumiine-openwrt-arm64 2>/dev/null | grep -q NEEDED; then
+            echo "❌ ERROR: Binary still has dynamic dependencies!"
+            readelf -d lumiine-openwrt-arm64 | grep NEEDED
+            exit 1
+          else
+            echo "✅ Success: Binary is fully static!"
+          fi
+
+      - name: Compress with UPX (ultra-brute)
+        run: |
+          echo "Compressing binary with UPX..."
           chmod +x lumiine-openwrt-arm64
           ./upx --ultra-brute lumiine-openwrt-arm64
+          echo "Compression complete. Final size:"
+          ls -lh lumiine-openwrt-arm64
 
-    - name: Upload
-      uses: actions/upload-artifact@v4
-      with:
-        name: lumiine-upx
-        path: lumiine-openwrt-arm64
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumiine-upx
+          path: lumiine-openwrt-arm64
+          if: success()
