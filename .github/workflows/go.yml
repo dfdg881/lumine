@@ -24,7 +24,6 @@ jobs:
           UPX_INFO=$(curl -sL "https://api.github.com/repos/upx/upx/releases/latest")
           UPX_VERSION=$(echo "$UPX_INFO" | jq -r '.tag_name | ltrimstr("v")')
           UPX_DOWNLOAD_URL=$(echo "$UPX_INFO" | jq -r '.assets[] | select(.name | test(".*amd64_linux.tar.xz$")) | .browser_download_url')
-          
           echo "version=$UPX_VERSION" >> $GITHUB_OUTPUT
           echo "download_url=$UPX_DOWNLOAD_URL" >> $GITHUB_OUTPUT
 
